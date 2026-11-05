@@ -38,7 +38,9 @@ jobs:
 
       - name: Tag and push to ghcr
         run: |
-          docker tag ${IMAGE}:${TAG} ghcr.io/${{ github.repository }}:${TAG}
-          docker tag ${IMAGE}:${TAG} ghcr.io/${{ github.repository }}:sha-${GITHUB_SHA}
-          docker push ghcr.io/${{ github.repository }}:${TAG}
-          docker push ghcr.io/${{ github.repository }}:sha-${GITHUB_SHA}
+          # github.repository 保留原始大小写，但 Docker 仓库名必须小写
+          GHCR_REPO="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          docker tag ${IMAGE}:${TAG} ghcr.io/${GHCR_REPO}:${TAG}
+          docker tag ${IMAGE}:${TAG} ghcr.io/${GHCR_REPO}:sha-${GITHUB_SHA}
+          docker push ghcr.io/${GHCR_REPO}:${TAG}
+          docker push ghcr.io/${GHCR_REPO}:sha-${GITHUB_SHA}
