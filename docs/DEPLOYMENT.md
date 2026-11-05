@@ -100,15 +100,26 @@ EOF
 
 > **`DATABASE_URL` 不用写**——compose 内部用 `POSTGRES_USER/PASSWORD/DB` 拼好注入 app 容器。
 
-**6.5 私有镜像需先登录**（ghcr 新包默认私有，不登录 pull 会 401）：
+**6.5 拉取镜像的认证**（ghcr 新包默认私有，不认证 `docker compose pull` 会报 401）。
 
-```bash
-# 建 PAT：GitHub → Settings → Developer settings → Personal access tokens
-#   classic：勾 read:packages；fine-grained：选 Packages → Read
-echo <你的PAT> | docker login ghcr.io -u <你的用户名> --password-stdin
-```
+> 关键认知：**仓库公开 ≠ 镜像包公开**。包有独立的可见性设置，新包默认 private，不管仓库是否公开。二选一：
 
-> 嫌麻烦可把包设为公开：Packages → 该包 → Package settings → Change visibility → Public。公开后免登录。
+**方式 A：把包设为公开（最简单，仓库公开时推荐）**
+
+1. GitHub → 仓库右侧 **Packages** → 点进 `fsrs-from-logseq-db` → **Package settings** → **Change visibility** → **Public**
+   - 直达：`https://github.com/users/Smallart/packages/container/package/fsrs-from-logseq-db`
+2. 之后服务器**无需任何登录**，直接 `docker compose pull`
+
+**方式 B：保持私有镜像 → 用 classic PAT 登录**
+
+1. 建 PAT：`https://github.com/settings/tokens` → **Generate new token (classic)** → 只勾 **`read:packages`** → Generate
+   - 注意：用 **classic** token，**不要**用 fine-grained（它的 `Packages` 权限对 ghcr 支持不稳定）
+2. 服务器登录：
+   ```bash
+   echo <你的PAT> | docker login ghcr.io -u Smallart --password-stdin
+   ```
+
+> 镜像里没有任何密钥，包公开无泄露风险；想严格私有就选方式 B。
 
 **6.6 拉取 + 启动**：
 

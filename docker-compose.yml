@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: fsrs-postgres
     restart: unless-stopped
     environment:
@@ -31,7 +31,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fsrs}:${POSTGRES_PASSWORD:-fsrs_secret}@postgres:5432/${POSTGRES_DB:-fsrs}
       APP_PASSWORD: ${APP_PASSWORD:-change_me}
       SESSION_SECRET: ${SESSION_SECRET:-change_me}
-      LOGSEQ_API_BASE: ${LOGSEQ_API_BASE:-http://110.41.171.187:8789}
+      LOGSEQ_API_BASE: ${LOGSEQ_API_BASE:-http://localhost:8789}
     ports:
       - "8790:8790"
 

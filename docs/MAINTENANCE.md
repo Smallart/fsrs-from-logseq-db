@@ -111,6 +111,21 @@ docker volume rm fsrs_postgres_data
 docker compose up -d
 ```
 
+### 4.4 数据库版本
+
+- 当前 compose 用 **`postgres:18-alpine`**（与本地 PostgreSQL 18 对齐），数据库端口仍是容器内 5432，`DATABASE_URL` 不受影响
+- **PostgreSQL 大版本（major version）数据目录不兼容**——16 的数据不能直接给 18 用
+  - 全新部署（卷还没初始化）：直接改 compose 的 `image` 到新版本再 `up -d` 即可，零成本
+  - **已有数据**：不能只改 tag（会报 `data directory incompatible`），必须迁移：
+    ```bash
+    docker exec fsrs-postgres pg_dump -U fsrs -Fc fsrs > upgrade.dump   # ① 导出
+    docker compose down
+    # ② 改 docker-compose.yml 的 image 为新版本
+    docker compose up -d postgres        # ③ 起新版（空卷）
+    docker exec -i fsrs-postgres pg_restore -U fsrs -d fsrs --clean --if-exists < upgrade.dump   # ④ 导入
+    ```
+  - 升级前先做一次完整备份（见 §2）
+
 ## 5. 建议的运维周期
 
 1. ✅ cron 每天 4 点 `pg_dump` 到 `/opt/fsrs/backups`（保留 7 天）
