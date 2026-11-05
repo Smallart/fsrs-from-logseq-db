@@ -26,7 +26,7 @@ jobs:
         run: docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org -t ${IMAGE}:${TAG} .
 
       - name: Login to SWR
-        run: docker login -u ${REGION}@${{ secrets.HUAWEI_SECRET_ACCESS_KEY }} -p ${{ secrets.HUAWEI_DOCKER_SECRET }} swr.${REGION}.myhuaweicloud.com
+        run: docker login -u "${REGION}@${{ secrets.HUAWEI_SECRET_ACCESS_KEY }}" -p "${{ secrets.HUAWEI_DOCKER_SECRET }}" swr.${REGION}.myhuaweicloud.com
 
       - name: Login to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
