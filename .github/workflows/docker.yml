@@ -1,4 +1,4 @@
-name: build
+name: build-push
 
 on:
   push:
@@ -7,33 +7,38 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  packages: write          # 推 ghcr 需要
+
+env:
+  REGION: cn-south-1        # ← 你的 SWR 区域 ID（如 cn-east-3 上海 / cn-north-4 北京）
+  ORG: smallar                # ← 你的 SWR 组织名称
+  IMAGE: fsrs-from-logseq-db
+  TAG: latest
 
 jobs:
-  docker:
+  build-and-push:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        # GitHub runner 用 npmjs 官方源更快
+        run: docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org -t ${IMAGE}:${TAG} .
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to SWR
+        run: docker login -u ${REGION}@${{ secrets.HUAWEI_SECRET_ACCESS_KEY }} -p ${{ secrets.HUAWEI_DOCKER_SECRET }} swr.${REGION}.myhuaweicloud.com
 
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,format=long
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      - name: Login to ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Tag and push to SWR
+        run: |
+          docker tag ${IMAGE}:${TAG} swr.${REGION}.myhuaweicloud.com/${ORG}/${IMAGE}:${TAG}
+          docker push swr.${REGION}.myhuaweicloud.com/${ORG}/${IMAGE}:${TAG}
+
+      - name: Tag and push to ghcr
+        run: |
+          docker tag ${IMAGE}:${TAG} ghcr.io/${{ github.repository }}:${TAG}
+          docker tag ${IMAGE}:${TAG} ghcr.io/${{ github.repository }}:sha-${GITHUB_SHA}
+          docker push ghcr.io/${{ github.repository }}:${TAG}
+          docker push ghcr.io/${{ github.repository }}:sha-${GITHUB_SHA}

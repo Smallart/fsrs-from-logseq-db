@@ -36,3 +36,8 @@ Thumbs.db
 
 # docs — not needed in the image build context
 docs
+
+# offline image tars / backups — don't bloat the build context
+*.tar
+*.tar.gz
+backups

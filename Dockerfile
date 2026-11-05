@@ -1,8 +1,10 @@
 # --- builder ---
 FROM node:20-alpine AS builder
 WORKDIR /app
+# 国内服务器直连 npmjs.org 常超时，默认走 npmmirror 加速（可用 --build-arg 覆盖）
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm config set registry ${NPM_REGISTRY} && npm ci
 COPY . .
 RUN npm run build
 
