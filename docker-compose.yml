@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fsrs-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fsrs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fsrs_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-fsrs}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fsrs}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    # GitHub Actions builds and pushes this image on every push to main.
+    # Replace YOUR_USERNAME with your GitHub username.
+    image: ghcr.io/Smallart/fsrs-from-logseq-db:latest
+    pull_policy: always
+    container_name: fsrs-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fsrs}:${POSTGRES_PASSWORD:-fsrs_secret}@postgres:5432/${POSTGRES_DB:-fsrs}
+      APP_PASSWORD: ${APP_PASSWORD:-change_me}
+      SESSION_SECRET: ${SESSION_SECRET:-change_me}
+      LOGSEQ_API_BASE: ${LOGSEQ_API_BASE:-http://110.41.171.187:8789}
+    ports:
+      - "8790:8790"
+
+volumes:
+  postgres_data:

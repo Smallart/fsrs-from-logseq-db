@@ -1,0 +1,38 @@
+# deps
+node_modules
+.pnp
+.pnp.*
+
+# next
+.next
+out
+build
+next-env.d.ts
+
+# env — never copy secrets into the build context
+.env
+.env.*
+!.env.example
+
+# ts
+*.tsbuildinfo
+
+# git / CI — not needed in the image build context
+.git
+.github
+.gitignore
+
+# compose / docker — managed on the server, not baked in
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# logs / os / editor
+*.log
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+
+# docs — not needed in the image build context
+docs
