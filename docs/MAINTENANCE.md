@@ -114,6 +114,7 @@ docker compose up -d
 ### 4.4 数据库版本
 
 - 当前 compose 用 **`postgres:18-alpine`**（与本地 PostgreSQL 18 对齐），数据库端口仍是容器内 5432，`DATABASE_URL` 不受影响
+- **postgres:18+ 数据卷必须挂到 `/var/lib/postgresql`（父目录）**：18 的默认 PGDATA 是 `/var/lib/postgresql/18/docker`，卷若挂在旧的 `/var/lib/postgresql/data` 会触发「unused mount/volume」启动失败（即使卷是空的）。备份/恢复用 `pg_dump`，不受此影响
 - **PostgreSQL 大版本（major version）数据目录不兼容**——16 的数据不能直接给 18 用
   - 全新部署（卷还没初始化）：直接改 compose 的 `image` 到新版本再 `up -d` 即可，零成本
   - **已有数据**：不能只改 tag（会报 `data directory incompatible`），必须迁移：

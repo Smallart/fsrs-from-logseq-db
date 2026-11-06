@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- app favicon: blue rounded square with a card stack -->
+  <rect width="64" height="64" rx="14" fill="#3b82f6"/>
+  <rect x="13" y="16" width="38" height="9" rx="4" fill="#ffffff" opacity="0.95"/>
+  <rect x="13" y="28" width="38" height="9" rx="4" fill="#ffffff" opacity="0.7"/>
+  <rect x="13" y="40" width="25" height="9" rx="4" fill="#ffffff" opacity="0.5"/>
+</svg>

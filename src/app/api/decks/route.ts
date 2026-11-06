@@ -5,6 +5,7 @@ import { requireAuth } from '@server/libs/auth'
 import { dayBoundaryMs } from '@server/services/scheduler'
 import { LogseqClient } from '@server/libs/logseq'
 import { loadConfig } from '@server/services/sync'
+import { log } from '@server/libs/logger'
 
 // Today's plan per deck (mirrors the scheduler's pick order):
 //   new      = max(0, min(day_limit.new - cards first-seen-today, remaining New cards))
@@ -167,9 +168,11 @@ export async function POST(req: NextRequest) {
         return d.id
       })
   } catch (e: any) {
+    log('error', 'deck create failed', { tagName, message: e?.message })
     return NextResponse.json({ error: e?.message ?? '创建失败' }, { status: 500 })
   }
 
+  log('info', 'deck created', { id: deckId, name: deskName || tagName, matched: noteIds.length })
   return NextResponse.json({
     deck: { id: deckId, name: deskName || tagName },
     matched: noteIds.length,

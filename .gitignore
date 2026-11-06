@@ -17,6 +17,9 @@ next-env.d.ts
 # ts
 *.tsbuildinfo
 
+# runtime logs (local dev)
+logs/
+
 # logs
 *.log
 npm-debug.log*

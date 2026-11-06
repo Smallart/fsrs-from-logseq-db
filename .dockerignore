@@ -41,3 +41,6 @@ docs
 *.tar
 *.tar.gz
 backups
+
+# runtime logs — mapped from the host, not baked into the image
+logs

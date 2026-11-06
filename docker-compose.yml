@@ -8,7 +8,14 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fsrs_secret}
       POSTGRES_DB: ${POSTGRES_DB:-fsrs}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # postgres:18+ 默认 PGDATA 是 /var/lib/postgresql/18/docker，卷要挂到父目录
+      # （挂 /var/lib/postgresql/data 会触发 "unused mount/volume" 启动失败）
+      - postgres_data:/var/lib/postgresql
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
@@ -20,9 +27,18 @@ services:
   app:
     # GitHub Actions builds and pushes this image to Huawei Cloud SWR on every push to main.
     # Replace REGION/ORG to match your SWR (region ID + organization name).
-    image: swr.cn-east-3.myhuaweicloud.com/fsrs/fsrs-from-logseq-db:latest
+    image: swr.cn-south-1.myhuaweicloud.com/smallar/fsrs-from-logseq-db:latest
     container_name: fsrs-app
     restart: unless-stopped
+    volumes:
+      # 应用日志写到 VPS 磁盘（/opt/fsrs/logs/app-YYYY-MM-DD.log），保留 14 天，容器重建不丢
+      - ./logs:/app/logs
+    logging:
+      # docker logs 本身也轮转，防止 /var/lib/docker 无限膨胀
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       postgres:
         condition: service_healthy
