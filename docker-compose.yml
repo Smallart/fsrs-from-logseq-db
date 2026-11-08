@@ -46,7 +46,11 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fsrs}:${POSTGRES_PASSWORD:-fsrs_secret}@postgres:5432/${POSTGRES_DB:-fsrs}
       APP_PASSWORD: ${APP_PASSWORD:-change_me}
       SESSION_SECRET: ${SESSION_SECRET:-change_me}
-      LOGSEQ_API_BASE: ${LOGSEQ_API_BASE:-http://localhost:8789}
+    extra_hosts:
+      # 网关 logseq-cli2http 以 systemd 服务跑在 VPS 宿主机上（默认 127.0.0.1:3000）。
+      # 应用容器经 host.docker.internal 访问它——全局设置里填
+      # http://host.docker.internal:3000（网关 HOST 需设为 0.0.0.0）
+      - "host.docker.internal:host-gateway"
     ports:
       - "8790:8790"
 

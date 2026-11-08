@@ -5,6 +5,8 @@ import { log } from '@server/libs/logger'
 
 export async function POST(req: NextRequest) {
   await requireAuth()
+  // fullCheck is accepted for API compatibility — every sync is a full
+  // gateway pull anyway (the gateway has no incremental endpoint)
   const body = await req.json().catch(() => ({}))
   const fullCheck = body?.fullCheck === true
   log('info', 'sync start', { fullCheck })

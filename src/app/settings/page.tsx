@@ -2,23 +2,26 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { ChevronLeft, LogOut, RefreshCw, Save, SearchCheck } from 'lucide-react'
+import { ChevronLeft, LogOut, RefreshCw, Save } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 
-type Config = { id: number; token: string | null; graph_id: string | null }
+type Config = { id: number; gatewayUrl: string | null }
 
 type SyncReport = {
-  indexed: number
+  pulled: number
   newCards: number
-  updatedCards: number
+  contentUpdated: number
+  stateUpdated: number
+  keptDirty: number
   deletedCards: number
-  skippedPages: string[]
-  skippedCards: number
-  unmatchedCards: number
+  decksCreated: number
+  pushed: number
+  pushConflicts: number
+  pushFailed: number
   fullCheck: boolean
   startedAt: number
   finishedAt: number
@@ -26,8 +29,7 @@ type SyncReport = {
 
 export default function SettingsPage() {
   const router = useRouter()
-  const [token, setToken] = useState('')
-  const [graphId, setGraphId] = useState('')
+  const [gatewayUrl, setGatewayUrl] = useState('')
   const [saving, setSaving] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [report, setReport] = useState<SyncReport | null>(null)
@@ -36,10 +38,7 @@ export default function SettingsPage() {
   useEffect(() => {
     fetch('/api/config')
       .then((r) => r.json())
-      .then((c: Config) => {
-        setToken(c.token ?? '')
-        setGraphId(c.graph_id ?? '')
-      })
+      .then((c: Config) => setGatewayUrl(c.gatewayUrl ?? ''))
   }, [])
 
   async function logout() {
@@ -50,23 +49,23 @@ export default function SettingsPage() {
   async function saveConfig() {
     setSaving(true)
     setMsg('')
-    await fetch('/api/config', {
+    const res = await fetch('/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, graph_id: graphId }),
+      body: JSON.stringify({ gatewayUrl: gatewayUrl.trim() }),
     })
     setSaving(false)
-    setMsg('已保存')
+    setMsg(res.ok ? '已保存' : (await res.json().catch(() => ({}))).error ?? '保存失败')
   }
 
-  async function runSync(full = false) {
+  async function runSync() {
     setSyncing(true)
     setReport(null)
     setMsg('')
     const res = await fetch('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fullCheck: full }),
+      body: JSON.stringify({ fullCheck: true }),
     })
     setReport(await res.json())
     setSyncing(false)
@@ -89,80 +88,74 @@ export default function SettingsPage() {
 
       <h1 className="text-xl font-bold">全局设置</h1>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Logseq 凭证</CardTitle>
-            <CardDescription>后端只读调用 Logseq API 所需的 PAT 与图 ID</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-1.5">
-              <Label>Token (logseq_pat_…)</Label>
-              <Input value={token} onChange={(e) => setToken(e.target.value)} placeholder="从 Logseq sync-worker 获取" />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Graph ID</Label>
-              <Input value={graphId} onChange={(e) => setGraphId(e.target.value)} placeholder="图 UUID" />
-            </div>
-            <Button onClick={saveConfig} disabled={saving} className="w-full">
-              <Save className="h-4 w-4" />
-              {saving ? '保存中…' : '保存凭证'}
-            </Button>
-          </CardContent>
-        </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>网关地址</CardTitle>
+          <CardDescription>
+            logseq-cli2http 网关的 URL——应用读写 Logseq 卡片与 FSRS 状态的唯一通道
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>网关 URL</Label>
+            <Input
+              value={gatewayUrl}
+              onChange={(e) => setGatewayUrl(e.target.value)}
+              placeholder="如 http://127.0.0.1:3000"
+            />
+          </div>
+          <Button onClick={saveConfig} disabled={saving} className="w-full">
+            <Save className="h-4 w-4" />
+            {saving ? '保存中…' : '保存'}
+          </Button>
+        </CardContent>
+      </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>同步</CardTitle>
-            <CardDescription>增量同步快速拉取；全量校验按内容哈希比对全部卡片</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-2">
-              <Button variant="outline" onClick={() => runSync(false)} disabled={syncing}>
-                <RefreshCw className="h-4 w-4" />
-                {syncing ? '同步中…' : '增量同步'}
-              </Button>
-              <Button variant="outline" onClick={() => runSync(true)} disabled={syncing}>
-                <SearchCheck className="h-4 w-4" />
-                全量校验
-              </Button>
-            </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>同步</CardTitle>
+          <CardDescription>
+            从网关全量拉取卡片：内容跟随 Logseq，FSRS 状态按 lastReview 仲裁（最新者赢），未推送的本地复习会自动补推
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Button onClick={runSync} disabled={syncing} className="w-full">
+            <RefreshCw className="h-4 w-4" />
+            {syncing ? '同步中…' : '立即同步'}
+          </Button>
 
-            {report && !('error' in report) && (
-              <div className="space-y-2 rounded-md bg-muted/60 p-3 text-sm">
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant="secondary">索引 {report.indexed}</Badge>
-                  <Badge variant="secondary">新增 {report.newCards}</Badge>
-                  <Badge variant="secondary">更新 {report.updatedCards}</Badge>
-                  <Badge variant="secondary">删除 {report.deletedCards}</Badge>
-                  <Badge variant="secondary">未更新 {report.unmatchedCards}</Badge>
-                  <Badge variant={report.fullCheck ? 'default' : 'outline'}>
-                    {report.fullCheck ? '全量' : '增量'}
-                  </Badge>
-                </div>
-                <div className="text-muted-foreground">
-                  耗时 {((report.finishedAt - report.startedAt) / 1000).toFixed(1)}s
-                </div>
+          {report && !('error' in report) && (
+            <div className="space-y-2 rounded-md bg-muted/60 p-3 text-sm">
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="secondary">拉取 {report.pulled}</Badge>
+                <Badge variant="secondary">新增 {report.newCards}</Badge>
+                <Badge variant="secondary">内容更新 {report.contentUpdated}</Badge>
+                <Badge variant="secondary">状态更新 {report.stateUpdated}</Badge>
+                <Badge variant="secondary">删除 {report.deletedCards}</Badge>
               </div>
-            )}
-
-            {report && !('error' in report) && report.unmatchedCards > 0 && (
-              <div className="text-sm text-orange-500">
-                ⚠ 检测到 {report.unmatchedCards} 张卡片有变化但未更新：这些卡片是候选，但其所在页面树中未找到对应块
+              <div className="flex flex-wrap gap-2">
+                <Badge variant={report.pushFailed > 0 ? 'destructive' : 'outline'}>补推 {report.pushed}</Badge>
+                <Badge variant="outline">推送冲突 {report.pushConflicts}</Badge>
+                <Badge variant={report.pushFailed > 0 ? 'destructive' : 'outline'}>
+                  推送失败 {report.pushFailed}
+                </Badge>
               </div>
-            )}
-
-            {report && !('error' in report) && report.skippedPages.length > 0 && (
-              <div className="break-all text-sm text-orange-500">
-                ⚠ 跳过 {report.skippedCards} 张卡片：它们挂在 Logseq 保留页面（tag 页面等）下，API
-                无法读取其内容，请把这些卡片移到普通页面。页面 ID：
-                {report.skippedPages.join('、')}
+              <div className="text-muted-foreground">
+                耗时 {((report.finishedAt - report.startedAt) / 1000).toFixed(1)}s
               </div>
-            )}
+            </div>
+          )}
 
-            {report && 'error' in report && <div className="text-sm text-destructive">{report.error}</div>}
-            {msg && <div className="text-sm text-emerald-600">{msg}</div>}
-          </CardContent>
-        </Card>
+          {report && !('error' in report) && report.pushFailed > 0 && (
+            <div className="text-sm text-orange-500">
+              ⚠ {report.pushFailed} 张卡的复习结果未能写回 Logseq（网关不可达或无 dbId），已保留待下次同步补推
+            </div>
+          )}
+
+          {report && 'error' in report && <div className="text-sm text-destructive">{report.error}</div>}
+          {msg && <div className="text-sm text-emerald-600">{msg}</div>}
+        </CardContent>
+      </Card>
     </div>
   )
 }

@@ -1,21 +1,22 @@
 import type { Generated } from 'kysely'
 
-// Kysely table types — mirror migrations/logs/20261104_init.ts
+// Kysely table types — mirror the gateway's FlatCard / TsFsrsCard shapes
+// verbatim (camelCase columns, see docs/WEB_FSRS_INTEGRATION.md §3).
+// Migration: src/server/migrations/logs/20261108_deck_anchors.ts
 // Columns with DB defaults / auto-increment are wrapped in Generated<>,
 // so they can be omitted on INSERT.
 
 export type DeckTable = {
   id: Generated<number>
+  /** deck name = the #Cards deck block's title; 'All' for the virtual base deck */
   name: string
-  /** source tag page uuid — null for the base All deck, UNIQUE otherwise */
-  logseq_uuid: Generated<string | null>
-  /** source tag title, e.g. 'vocab' (null for the base deck) */
-  tag_name: Generated<string | null>
+  /** #Cards deck block uuid (stable anchor); null for the base All deck */
+  anchorUuid: Generated<string | null>
   /** user-provided display name; null → display falls back to name */
-  desk_name: Generated<string | null>
+  deskName: Generated<string | null>
   fsrs: Generated<FSRSParametersRow>
-  card_limit: Generated<CardLimitRow>
-  p_due: Generated<number>
+  cardLimit: Generated<CardLimitRow>
+  pDue: Generated<number>
   deleted: Generated<boolean>
   created: Generated<number>
   updated: Generated<number>
@@ -31,39 +32,61 @@ export type NoteDeckTable = {
   created: Generated<number>
 }
 
+/** FlatCard minus card/answer — answers are requested per-card at review. */
 export type NoteTable = {
   id: Generated<number>
   did: number
+  /** Logseq block UUID — the stable join key with gateway cards */
   logseq_uuid: string
-  page_id: string | null
+  /** Logseq block db/id — used for the gateway's single-card endpoints */
+  dbId: Generated<number | null>
   question: string
-  answer: Generated<string[]>
-  content_hash: string
-  source: Generated<string>
+  /** first non-builtin tag title, e.g. 'Dictionary-Item'; null if none */
+  deck: Generated<string | null>
+  pageId: Generated<number | null>
+  parentId: Generated<number | null>
+  tags: Generated<string[]>
+  /** custom `*.property/*` values except the fsrs plugin's */
+  properties: Generated<Record<string, unknown> | null>
+  /** card_params | fsrs-legacy | default */
+  cardSource: Generated<string>
+  /** block creation time, ms (from Logseq) */
+  createdAt: Generated<number | null>
+  /** block update time, ms — content-change hint (§4.3) */
+  updatedAt: Generated<number | null>
   deleted: Generated<boolean>
   created: Generated<number>
   updated: Generated<number>
 }
 
+/** TsFsrsCard verbatim (+ local bookkeeping columns). */
 export type CardTable = {
   id: Generated<number>
   did: number
   nid: number
-  due: number
-  stability: Generated<number>
-  difficulty: Generated<number>
-  elapsed_days: Generated<number>
-  scheduled_days: Generated<number>
+  state: Generated<number> // 0 new / 1 learning / 2 review / 3 relearning
+  due: Generated<number> // ms
+  stability: Generated<number> // days
+  difficulty: Generated<number> // 1–10
+  /** ★ arbitration key: the newest lastReview wins (§4.1) */
+  lastReview: number | null
+  learningSteps: Generated<number> // plugin extra (ts-fsrs 4.5 core ignores it)
+  priorState: Generated<number> // state before the last review (plugin extra)
+  elapsedDays: Generated<number>
+  scheduledDays: Generated<number>
   reps: Generated<number>
   lapses: Generated<number>
-  state: Generated<number>
-  last_review: number | null
+  lastRating: Generated<number | null> // 1 again / 2 hard / 3 good / 4 easy
+  cardSource: Generated<string>
+  /** local review awaiting gateway PUSH (PULL/merge/PUSH §4.2) */
+  dirty: Generated<boolean>
   suspended: Generated<boolean>
   deleted: Generated<boolean>
   created: Generated<number>
   updated: Generated<number>
 }
 
+/** pre-review snapshot per review — powers undo (fsrs.rollback). */
 export type RevlogTable = {
   id: Generated<number>
   did: number
@@ -74,9 +97,9 @@ export type RevlogTable = {
   due: number
   stability: number
   difficulty: number
-  elapsed_days: Generated<number>
-  last_elapsed_days: Generated<number>
-  scheduled_days: Generated<number>
+  elapsedDays: Generated<number>
+  lastElapsedDays: Generated<number>
+  scheduledDays: Generated<number>
   review: number
   duration: Generated<number>
   deleted: Generated<boolean>
@@ -85,8 +108,8 @@ export type RevlogTable = {
 
 export type ConfigTable = {
   id: Generated<number>
-  token: string | null
-  graph_id: string | null
+  /** logseq-cli2http gateway base URL, e.g. http://127.0.0.1:3000 */
+  gatewayUrl: string | null
 }
 
 export type SyncMetaTable = {

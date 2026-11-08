@@ -11,6 +11,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'invalid cid or lid' }, { status: 400 })
   }
   const r = await scheduler.undo(cid, lid)
-  log('info', 'undo', { cid, lid, ok: !!r })
+  log('info', 'undo', { cid, lid, state: r.next_state, due: r.next_due })
   return NextResponse.json(r)
 }

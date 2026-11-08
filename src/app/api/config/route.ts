@@ -8,9 +8,14 @@ export async function GET() {
   return NextResponse.json(row)
 }
 
+// PUT /api/config — save the logseq-cli2http gateway base URL
 export async function PUT(req: NextRequest) {
   await requireAuth()
-  const { token, graph_id } = await req.json()
-  await db.updateTable('config').set({ token: token ?? null, graph_id: graph_id ?? null }).where('id', '=', 1).execute()
+  const { gatewayUrl } = await req.json()
+  const url = typeof gatewayUrl === 'string' ? gatewayUrl.trim() : null
+  if (url !== null && !/^https?:\/\//i.test(url)) {
+    return NextResponse.json({ error: '网关 URL 必须以 http:// 或 https:// 开头' }, { status: 400 })
+  }
+  await db.updateTable('config').set({ gatewayUrl: url }).where('id', '=', 1).execute()
   return NextResponse.json({ ok: true })
 }

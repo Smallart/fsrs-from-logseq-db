@@ -12,11 +12,13 @@ type Card = {
   cid: number
   nid: number
   did: number
+  dbId: number | null
   question: string
-  answer: string[]
   state: number
   due: number
 } | { empty: true }
+
+type Detail = { cid: number; question: string; answer: string[] }
 
 type Stats = {
   deck: { id: number; name: string }
@@ -72,6 +74,7 @@ function ReviewInner() {
 
   const [card, setCard] = useState<Card | null>(null)
   const [stats, setStats] = useState<Stats | null>(null)
+  const [detail, setDetail] = useState<Detail | null>(null)
   const [showAnswer, setShowAnswer] = useState(false)
   const [loading, setLoading] = useState(false)
   const [lastReview, setLastReview] = useState<{ cid: number; lid: number } | null>(null)
@@ -81,6 +84,7 @@ function ReviewInner() {
     setLoading(true)
     setError('')
     setShowAnswer(false)
+    setDetail(null)
     try {
       const [cardRes, statsRes] = await Promise.all([
         fetch(`/api/cards/next${query}`),
@@ -111,6 +115,21 @@ function ReviewInner() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [lastReview, loading])
+
+  // 显示答案 → the answer is fetched from the gateway per-card (§4.5) —
+  // answers are never stored locally
+  async function revealAnswer() {
+    if (!card || 'empty' in card) return
+    setShowAnswer(true)
+    setDetail(null)
+    try {
+      const res = await fetch(`/api/cards/${card.cid}/detail`)
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? '获取答案失败')
+      setDetail((await res.json()) as Detail)
+    } catch (e: any) {
+      setError(e?.message ?? '获取答案失败')
+    }
+  }
 
   async function grade(g: 1 | 2 | 3 | 4) {
     if (!card || 'empty' in card) return
@@ -217,16 +236,22 @@ function ReviewInner() {
             <div className="whitespace-pre-wrap text-lg leading-relaxed">
               {renderQuestion(card.question, showAnswer)}
             </div>
-            {showAnswer && card.answer.length > 0 && (
+            {showAnswer && (
               <>
                 <Separator />
                 <div className="space-y-1">
-                  <div className="text-xs text-muted-foreground">答案</div>
-                  {card.answer.map((a, i) => (
-                    <div key={i} className="whitespace-pre-wrap text-base leading-relaxed">
-                      {a}
-                    </div>
-                  ))}
+                  <div className="text-xs text-muted-foreground">
+                    答案{detail ? '' : '获取中…'}
+                  </div>
+                  {detail?.answer.length ? (
+                    detail.answer.map((a, i) => (
+                      <div key={i} className="whitespace-pre-wrap text-base leading-relaxed">
+                        {a}
+                      </div>
+                    ))
+                  ) : detail ? (
+                    <div className="text-sm text-muted-foreground">（无答案子块）</div>
+                  ) : null}
                 </div>
               </>
             )}
@@ -239,7 +264,7 @@ function ReviewInner() {
       {!showAnswer ? (
         <Button
           className="h-14 w-full text-base"
-          onClick={() => setShowAnswer(true)}
+          onClick={revealAnswer}
           disabled={loading || !card || ('empty' in card)}
         >
           显示答案

@@ -1,154 +1,173 @@
 # 部署指南
 
-把源码推上 GitHub，Actions 自动构建 Docker 镜像推到 ghcr.io，VPS 拉镜像运行。
+源码推上 GitHub → Actions 自动构建镜像 → **双推**（华为云 SWR 主 + ghcr 备份）→ VPS 从 **SWR** 拉取运行。
+
+> **为什么用 SWR 不用 ghcr 直连**：见 §2「问题与解决」。一句话——国内 VPS 直连 ghcr.io 极慢/不通，SWR 在国内，拉取飞快。
 
 ## 1. 架构总览
 
 ```
-本地 git push ──▶ GitHub 仓库 ──▶ GitHub Actions（build + push 镜像）
-                                       │
-                                       ▼
-                        ghcr.io/<用户名>/fsrs-from-logseq-db:latest
-                                       │  docker compose pull
-                                       ▼
-                    VPS：fsrs-app 容器（Next.js + FSRS）
-                        fsrs-postgres 容器（数据卷 postgres_data）
+本地 git push ──▶ GitHub 仓库 ──▶ GitHub Actions（build + 双推）
+                                    ├──▶ 华为云 SWR（主，VPS 从这里拉）
+                                    └──▶ ghcr.io（备份，SWR 故障时切换）
+                                              │
+                              docker compose pull（从 SWR）
+                                              ▼
+                VPS：fsrs-app（Next.js + FSRS） + fsrs-postgres（数据卷 postgres_data）
 ```
 
-- 源码上传 GitHub；镜像推 ghcr.io；**镜像内无任何密钥**
-- 密钥（数据库密码、登录密码、session 密钥、Logseq token）全部在服务器 `.env`，运行时注入
+- 镜像**无任何密钥**；密钥（DB 密码/登录密码/session 密钥/Logseq token）全在服务器 `.env`，运行时注入
 - app 容器启动时自动执行数据库迁移
+- 应用日志持久化到 `/opt/fsrs/logs/`（按天分文件，保留 14 天）
 
-## 2. 前置准备
+## 2. 问题与解决：为什么不直接拉 ghcr 镜像
+
+**问题**：GitHub Actions 构建的镜像默认推 ghcr.io。但国内 VPS **直连 ghcr.io 经常超时或极慢**（实测约 50KB/s，200MB 要 1 小时+）；Docker 镜像加速器**只代理 Docker Hub（docker.io），不代理 ghcr.io**，帮不上忙。
+
+**尝试过的方案**：
+
+| 方案 | 结果 |
+|---|---|
+| 国内镜像加速器（registry-mirrors） | ❌ 只对 docker.io 有效，ghcr 无效 |
+| ghcr 代理站（1ms/DaoCloud 等） | ⚠ 时效不稳，可用性没保障 |
+| 离线 `docker save`/`load` 传镜像 | ✅ 能用，但要手动、每次更新都传 |
+| **华为云 SWR 作主仓库** | ✅ **国内仓库，VPS 拉取秒级** |
+
+**最终方案（推荐）**：工作流**同时推 SWR + ghcr**（双保险）。服务器固定从 **SWR** 拉（快）；ghcr 那份是备份，SWR 故障时把 compose 的 `image:` 切回 ghcr 即可。
+
+## 3. 前置准备
 
 | 位置 | 需要 |
 |---|---|
-| 本地 | `git`，一个 GitHub 账号 |
-| GitHub | 一个空仓库（推荐名 `fsrs-from-logseq-db`） |
-| 服务器 | Ubuntu/Debian，公网 IP，**防火墙放行 8790**（云安全组 + 系统防火墙） |
+| 华为云 | 账号；SWR 已建**组织**；**AK/SK**；「长期有效登录指令」的**密码** |
+| GitHub | 一个空仓库（`fsrs-from-logseq-db`）；**3 个 Secrets**（见 §4） |
+| 本地 | `git` |
+| 服务器 | Ubuntu/Debian，公网 IP，**放行 8790**（安全组 + 系统防火墙） |
 
-## 3. 修改镜像地址（重要）
+## 4. GitHub Secrets（仓库 → Settings → Secrets and variables → Actions）
 
-`docker-compose.yml` 里镜像名现在是占位符，**改成你的真实 GitHub 用户名**：
+| Name | 值 |
+|---|---|
+| `HUAWEI_SECRET_ACCESS_KEY` | 华为云 AK |
+| `HUAWEI_SECRET_SECRET_KEY` | 华为云 SK（备用，工作流主要用 AK + 登录密码） |
+| `HUAWEI_DOCKER_SECRET` | SWR「长期有效登录指令」里 `-p` 后面的密码 |
+
+> ghcr 用 `GITHUB_TOKEN`，自动有，**不用配**。
+
+## 5. 工作流（`.github/workflows/docker.yml`）
+
+`push` 到 `main` 或手动触发，构建一次、双推。**只需改顶部两个值**：
 
 ```yaml
-app:
-  image: ghcr.io/YOUR_USERNAME/fsrs-from-logseq-db:latest   # ← 替换 YOUR_USERNAME
-  pull_policy: always
+env:
+  REGION: cn-south-1     # ← 你的 SWR 区域 ID
+  ORG: smallar           # ← 你的 SWR 组织名称
+  IMAGE: fsrs-from-logseq-db
+  TAG: latest
 ```
 
-> 这一步在本地改好再推送；服务器部署时会把这份（已改好的）compose 拷过去。
+流程：build（GitHub runner 用 npmjs 源）→ 登录 SWR（AK + 登录密码）→ 推 SWR → 登录 ghcr（GITHUB_TOKEN）→ 推 ghcr（`:latest` + `:sha-<commit>`）。
 
-## 4. 本地推送
+> 历史坑（已修，供参考）：
+> - 缺 `id: meta` 导致 `docker buildx` 无 tag → 已加
+> - SWR 登录密码含空格未加引号 → 已加引号
+> - `github.repository` 保留大写 `Smallart`，Docker 仓库名必须小写 → 已用 `tr` 转小写
+
+## 6. 本地推送
 
 ```powershell
-# 4.1 建仓库 + 首次提交
 git init
 git add .
-git commit -m "init: FSRS review app with tag decks"
-
-# 4.2 在 GitHub 建空仓库（二选一）
-#     A. 网页：github.com → New repository → 名 fsrs-from-logseq-db → 不勾 README → Create
-#     B. 命令行（已装 gh）：gh repo create fsrs-from-logseq-db --private --source . --remote origin --push
-#        —— 用 B 的话，下面 4.3 / 4.4 跳过
-
-# 4.3 关联远程
+git commit -m "init: FSRS review app"
 git remote add origin git@github.com:<你的用户名>/fsrs-from-logseq-db.git
-
-# 4.4 首次推送
 git push -u origin main
 ```
 
-> `.gitignore` 已排除 `.env`，密码/token 不会上传；`.dockerignore` 也排除 `.env`，镜像里同样没有密钥。
+> `.gitignore` 排除 `.env`；`.dockerignore` 排除 `.env`/`node_modules`/`.next`/`logs`，镜像无密钥。
 
-## 5. Actions 自动构建（push 后自动发生）
-
-1. 打开仓库 **Actions** 标签页 → 看到 `build` 工作流在跑
-2. 点进去看进度（约 3–6 分钟），出现绿色对勾即成功
-3. 成功后右侧 **Packages** 里出现 `fsrs-from-logseq-db`，`:latest` 可用
-4. 失败则点进日志看红字（最常见：类型错误、Dockerfile 问题）
-5. 也可在 Actions 页点 **Run workflow** 手动触发
-
-## 6. 服务器部署
+## 7. 服务器部署
 
 ```bash
-# 6.1 装 Docker（Ubuntu/Debian 一键脚本）
+# 7.1 装 Docker
 curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-newgrp docker        # 或重新登录，让 docker 组生效
+sudo usermod -aG docker $USER && newgrp docker
 
-# 6.2 部署目录
+# 7.2 部署目录 + 拷 compose
 sudo mkdir -p /opt/fsrs && cd /opt/fsrs
-
-# 6.3 把项目里的 docker-compose.yml（已含真实用户名）拷到服务器
-#     本地执行：scp docker-compose.yml <用户>@<服务器IP>:/opt/fsrs/
-#     或直接在服务器 vim 粘贴该文件
+# 本地：scp docker-compose.yml <用户>@<服务器IP>:/opt/fsrs/
 ```
 
-**6.4 创建 `/opt/fsrs/.env`**（compose 自动读取同目录 `.env`）：
+**7.3 `.env`**（compose 自动读取）：
 
 ```bash
 cat > /opt/fsrs/.env << 'EOF'
 POSTGRES_USER=fsrs
-POSTGRES_PASSWORD=<openssl rand -base64 24>   # 生成强密码填入
+POSTGRES_PASSWORD=<openssl rand -base64 24>
 POSTGRES_DB=fsrs
 APP_PASSWORD=<你的登录密码>
-SESSION_SECRET=<openssl rand -base64 32>      # 生成强随机填入
-LOGSEQ_API_BASE=http://110.41.171.187:8789
+SESSION_SECRET=<openssl rand -base64 32>
 EOF
 ```
 
-> **`DATABASE_URL` 不用写**——compose 内部用 `POSTGRES_USER/PASSWORD/DB` 拼好注入 app 容器。
+> `DATABASE_URL` 不用写，compose 内部拼好注入。
+> Logseq 相关配置不再走环境变量：卡片数据经 **logseq-cli2http 网关** 读写，
+> 网关 URL 在应用「全局设置」页配置（存 `config` 表）。
+> Docker 内访问宿主机上的网关：`http://host.docker.internal:3000`
+> （compose 已加 `extra_hosts: host.docker.internal:host-gateway`；网关 HOST 需为 `0.0.0.0`）。
 
-**6.5 拉取镜像的认证**（ghcr 新包默认私有，不认证 `docker compose pull` 会报 401）。
+**7.4 数据卷挂载（关键，postgres 18）**：compose 里 postgres 卷必须挂 **`postgres_data:/var/lib/postgresql`**（父目录）。挂旧的 `/var/lib/postgresql/data` 会触发 `unused mount/volume` 启动失败（即使卷空）。
 
-> 关键认知：**仓库公开 ≠ 镜像包公开**。包有独立的可见性设置，新包默认 private，不管仓库是否公开。二选一：
+**7.5 SWR 拉取认证**（SWR 仓库默认私有）：
 
-**方式 A：把包设为公开（最简单，仓库公开时推荐）**
+```bash
+docker login -u "cn-south-1@你的AK" -p "你的SWR登录密码" swr.cn-south-1.myhuaweicloud.com
+```
 
-1. GitHub → 仓库右侧 **Packages** → 点进 `fsrs-from-logseq-db` → **Package settings** → **Change visibility** → **Public**
-   - 直达：`https://github.com/users/Smallart/packages/container/package/fsrs-from-logseq-db`
-2. 之后服务器**无需任何登录**，直接 `docker compose pull`
+> 或在 SWR 控制台把 `fsrs-from-logseq-db` 仓库设为**公开**，免登录。
 
-**方式 B：保持私有镜像 → 用 classic PAT 登录**
-
-1. 建 PAT：`https://github.com/settings/tokens` → **Generate new token (classic)** → 只勾 **`read:packages`** → Generate
-   - 注意：用 **classic** token，**不要**用 fine-grained（它的 `Packages` 权限对 ghcr 支持不稳定）
-2. 服务器登录：
-   ```bash
-   echo <你的PAT> | docker login ghcr.io -u Smallart --password-stdin
-   ```
-
-> 镜像里没有任何密钥，包公开无泄露风险；想严格私有就选方式 B。
-
-**6.6 拉取 + 启动**：
+**7.6 拉取 + 启动**：
 
 ```bash
 docker compose pull
-docker compose up -d          # postgres 先健康，app 再启动（自动跑迁移）
-docker compose logs -f app    # 看到迁移成功 + Next.js Ready 即完成，Ctrl+C 退出
+docker compose up -d
+docker compose logs -f app      # 等迁移 + Ready
 ```
 
-**6.7 防火墙放行 8790**：
+**7.7 防火墙**：
 
 ```bash
-sudo ufw allow 8790/tcp       # Ubuntu 防火墙（若有）
-# 另外：云厂商安全组入方向规则也要放行 8790（TCP）
+sudo ufw allow 8790/tcp
+# 云安全组入方向也放行 TCP 8790
 ```
 
-## 7. 验证
+## 8. 验证
 
-浏览器访问 `http://<服务器IP>:8790` → 用 `APP_PASSWORD` 登录 → 首页应显示 deck 列表。
-若首次部署，先到全局设置配 Logseq PAT + graphId，再同步拉取卡片。
+浏览器访问 `http://<服务器IP>:8790` → `APP_PASSWORD` 登录 → 全局设置填**网关 URL**（logseq-cli2http 地址，如 `http://host.docker.internal:3000`）→ 同步 → deck 列表（deck 由卡片 tag 自动生成）。
 
-## 8. 日常更新
+日志：`tail -f /opt/fsrs/logs/app-$(date +%F).log`（同步/复习等操作+结果都记录）。
 
-```bash
-# 本地：改代码 → 提交 → 推送
+## 9. 日常更新
+
+```powershell
+# 本地：改代码 → 提交 → 推送（触发 Actions 重建）
 git add . && git commit -m "..." && git push
-
-# 服务器：拉新镜像 + 重启
+# 若 compose 有改动，先同步：
+scp docker-compose.yml <用户>@<服务器IP>:/opt/fsrs/
+```
+```bash
+# 服务器：等 Actions 变绿后
 cd /opt/fsrs && docker compose pull && docker compose up -d
+docker compose logs -f app
 ```
 
-> `pull_policy: always` 下 `docker compose up -d` 本身会尝试拉取；显式 `pull` 更稳。
+> 没有 `pull_policy: always`，**必须显式 `docker compose pull`**。
+
+## 10. 常用排障
+
+| 现象 | 处理 |
+|---|---|
+| `docker compose pull` 401 | 未登录 SWR（7.5）或登录密码过期 → 重新生成登录指令 |
+| postgres 启动报 `unused mount/volume` | 卷挂载点不是 `/var/lib/postgresql` → 改 compose（7.4） |
+| postgres `data directory incompatible` | 旧 16 卷 → 清卷重建（全新部署无数据时） |
+| app 同步失败 | `docker compose logs` 或 `/opt/fsrs/logs/*.log` 看 `sync failed` 的 `message` |
+| 端口被占 | `docker compose down && docker compose up -d` |

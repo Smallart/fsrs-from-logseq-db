@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { sql, type SqlBool } from 'kysely'
+import { sql } from 'kysely'
 import { db } from '@server/models/db'
 import { requireAuth } from '@server/libs/auth'
 
 // GET /api/cards — card browser with filters.
 //   deck=<did>        filter by deck id
-//   answer=<text>     substring match (ILIKE) against any element of notes.answer (jsonb)
+//   question=<text>   substring match (ILIKE) against notes.question
 //   suspended=<0|1>   filter by suspended flag (omitted = all)
 //   deleted=<0|1>     filter by deleted flag (omitted = all)
 //   state=<0|1|2|3>   filter by FSRS card state (0=New 1=Learning 2=Review 3=Relearning)
@@ -14,9 +14,8 @@ import { requireAuth } from '@server/libs/auth'
 //   limit=<n>         page size, default 50, max 1000
 //   offset=<n>        pagination offset, default 0
 // Returns { cards, total } — total counts ALL rows matching the filters via a
-// window function (count(*) over () is computed after WHERE, before LIMIT).
-// Rows are always secondarily ordered by c.id as a stable tiebreaker, so
-// offset pagination never skips or duplicates rows.
+// window function. Rows are always secondarily ordered by c.id so offset
+// pagination never skips or duplicates rows.
 export async function GET(req: NextRequest) {
   await requireAuth()
   const sp = new URL(req.url).searchParams
@@ -24,7 +23,7 @@ export async function GET(req: NextRequest) {
   const deckParam = sp.get('deck')
   const deckId = deckParam !== null && /^\d+$/.test(deckParam) ? Number(deckParam) : undefined
 
-  const answer = (sp.get('answer') ?? '').trim()
+  const question = (sp.get('question') ?? '').trim()
   const suspended = sp.get('suspended')
   const deleted = sp.get('deleted')
   const state = sp.get('state')
@@ -58,10 +57,8 @@ export async function GET(req: NextRequest) {
       db.selectFrom('note_decks').select('nid').where('did', '=', deckId).where('deleted', '=', false),
     )
   }
-  if (answer) {
-    query = query.where(
-      sql<SqlBool>`exists (select 1 from jsonb_array_elements_text(n.answer) a where a ilike ${`%${answer}%`})`,
-    )
+  if (question) {
+    query = query.where('n.question', 'ilike', `%${question}%`)
   }
   if (suspended === '0') query = query.where('c.suspended', '=', false)
   if (suspended === '1') query = query.where('c.suspended', '=', true)

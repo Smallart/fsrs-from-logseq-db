@@ -22,10 +22,7 @@ export async function GET(req: NextRequest) {
     .executeTakeFirstOrThrow()
 
   const now = new Date()
-  const { todayStart, nextBoundary } = dayBoundaryMs(
-    now,
-    (deck.fsrs as { day_start?: number } | null)?.day_start ?? 3,
-  )
+  const { todayStart, nextBoundary } = dayBoundaryMs(now, deck.fsrs.day_start ?? 3)
 
   // note-level deck membership (shared cards)
   const memberNids = () =>
@@ -64,12 +61,12 @@ export async function GET(req: NextRequest) {
     .executeTakeFirst()
 
   const learnedToday = learnedRow?.cnt ?? 0
-  const newLimit = (deck.card_limit as { new?: number } | null)?.new ?? 20
+  const newLimit = deck.cardLimit.new ?? 20
   const newAvail = Math.max(0, Math.min(newLimit - learnedToday, boxes?.new_total ?? 0))
 
   return NextResponse.json({
-    // display name falls back to the system name when desk_name is unset
-    deck: { id: deck.id, name: deck.desk_name ?? deck.name },
+    // display name falls back to the system name when deskName is unset
+    deck: { id: deck.id, name: deck.deskName ?? deck.name },
     boxes: {
       new: newAvail,
       learning: boxes?.learning ?? 0,

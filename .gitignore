@@ -17,8 +17,9 @@ next-env.d.ts
 # ts
 *.tsbuildinfo
 
-# runtime logs (local dev)
-logs/
+# runtime logs (local dev) — anchored to the repo root; must NOT ignore
+# src/server/migrations/logs/ (DB migration files live in a "logs" dir too)
+/logs/
 
 # logs
 *.log

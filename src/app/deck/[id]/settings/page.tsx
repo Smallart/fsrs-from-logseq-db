@@ -21,10 +21,10 @@ type DeckFsrs = {
 type Deck = {
   id: number
   name: string
-  desk_name?: string | null
+  deskName?: string | null
   fsrs: DeckFsrs
-  card_limit: { new: number; review: number; learning: number }
-  p_due: number
+  cardLimit: { new: number; review: number; learning: number }
+  pDue: number
 }
 
 function NumField({
@@ -56,7 +56,7 @@ export default function DeckSettingsPage({ params }: { params: { id: string } })
   const deckId = Number(params.id)
   const [deck, setDeck] = useState<Deck | null>(null)
   const [f, setF] = useState<DeckFsrs | null>(null)
-  const [cl, setCl] = useState<Deck['card_limit'] | null>(null)
+  const [cl, setCl] = useState<Deck['cardLimit'] | null>(null)
   const [pDue, setPDue] = useState(0)
   const [wText, setWText] = useState('')
   const [saving, setSaving] = useState(false)
@@ -71,8 +71,8 @@ export default function DeckSettingsPage({ params }: { params: { id: string } })
         if (hit) {
           setDeck(hit)
           setF(hit.fsrs)
-          setCl(hit.card_limit)
-          setPDue(hit.p_due)
+          setCl(hit.cardLimit)
+          setPDue(hit.pDue)
           setWText(JSON.stringify(hit.fsrs.w))
         }
       })
@@ -91,7 +91,7 @@ export default function DeckSettingsPage({ params }: { params: { id: string } })
       const res = await fetch(`/api/decks/${deckId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fsrs: { ...f, w }, card_limit: cl, p_due: pDue }),
+        body: JSON.stringify({ fsrs: { ...f, w }, cardLimit: cl, pDue }),
       })
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? '保存失败')
       setMsg('已保存')
@@ -124,7 +124,7 @@ export default function DeckSettingsPage({ params }: { params: { id: string } })
 
       <Card>
         <CardHeader>
-          <CardTitle>{deck.desk_name ?? deck.name} · Deck 参数</CardTitle>
+          <CardTitle>{deck.deskName ?? deck.name} · Deck 参数</CardTitle>
           <CardDescription>FSRS 调度参数与每日卡片上限，保存后立即生效</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">

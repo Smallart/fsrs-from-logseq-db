@@ -1,311 +1,505 @@
 import { db } from '@server/models/db'
-import type { BlockResponse } from '@server/libs/logseq'
-import { LogseqClient } from '@server/libs/logseq'
-import { createHash } from 'crypto'
+import { GatewayClient, type FlatCard, type TsFsrsCard, type DeckDef } from '@server/libs/gateway'
 
-// pg's prepareValue serializes JS arrays into PostgreSQL array literals
-// (e.g. ['a','b'] → '{"a","b"}'), which is NOT valid JSON and triggers
-// "invalid input syntax for type json" on jsonb columns. We must pass an
-// already-JSON.stringify'd string so pg treats it as a JSON literal.
-// (Read side is fine: pg.types.setTypeParser(3802, JSON.parse) in db.ts
-// parses jsonb back into a string[] at query time.)
-const jsonb = (v: unknown): string[] => JSON.stringify(v) as unknown as string[]
+// ---------------------------------------------------------------------------
+// Sync engine — web-fsrs client side of the PULL → merge → PUSH protocol
+// (docs/WEB_FSRS_INTEGRATION.md §4).
+//
+//   ① PULL   gateway GET /api/decks + GET /api/cards — the gateway has no
+//             incremental API; every sync is a full pull + merge. The two
+//             calls run sequentially (the gateway's CLI spawns must not
+//             race on the db-worker lifecycle).
+//   ② decks  decks are #Cards query blocks in the graph: created/renamed/
+//             removed to mirror GET /api/decks (anchor = block uuid); card
+//             membership = each deck's resolved memberDbIds (+ virtual All).
+//   ③ merge  per card, lastReview arbitrates (§4.1: newest wins):
+//             gateway newer → overwrite local cards row (dirty=false)
+//             local newer   → keep, stays dirty (awaiting PUSH)
+//             content (question/…) always follows the gateway
+//   ④ PUSH   for dirty cards: re-read the block via the gateway, push the
+//             local state with base = the block's current lastReview; on 409
+//             the gateway's state wins and overwrites the local row.
+//
+// The Logseq DB block `card_params` is the single source of truth; this PG
+// is a local cache. Decks are defined in Logseq (#Cards blocks), never
+// created manually in the app.
+// ---------------------------------------------------------------------------
 
-// ---- config access ----
-export async function loadConfig(): Promise<{ token: string; graphId: string }> {
-  const row = await db.selectFrom('config').selectAll().where('id', '=', 1).executeTakeFirstOrThrow()
-  if (!row.token || !row.graph_id) {
-    throw new Error('Logseq token or graph_id not configured. Set them in Settings.')
+// pg serializes JS arrays/objects into PG literals (invalid JSON for jsonb),
+// so stringify explicitly before insert/update.
+const jsonb = <T>(v: unknown) => JSON.stringify(v) as unknown as T
+
+/** TsFsrsCard → cards-row values (camelCase mirrors both sides). */
+export function tsCardValues(c: TsFsrsCard) {
+  return {
+    state: c.state,
+    due: c.due,
+    stability: c.stability,
+    difficulty: c.difficulty,
+    lastReview: c.lastReview,
+    learningSteps: c.learningSteps,
+    priorState: c.priorState,
+    elapsedDays: c.elapsedDays,
+    scheduledDays: c.scheduledDays,
+    reps: c.reps,
+    lapses: c.lapses,
+    lastRating: c.lastRating,
   }
-  return { token: row.token, graphId: row.graph_id }
 }
 
-// ---- parsing ----
-export type ParsedCard = {
-  question: string
-  answer: string[]
-  pageId: string | null
-  hash: string
-}
-
-export function parseCard(block: BlockResponse): ParsedCard {
-  const question = (block.title ?? '').trim()
-  const answer = (block.children ?? []).map((c) => (c.title ?? '').trim()).filter((s) => s.length > 0)
-  const pageId = block['page-id'] ?? null
-  const hash = hashCard(question, answer)
-  return { question, answer, pageId, hash }
-}
-
-function hashCard(question: string, answer: string[]): string {
-  return createHash('sha256').update(JSON.stringify({ q: question, a: answer })).digest('hex')
-}
-
-// Logseq reserved pages (tag pages, all-pages, flashcards, …) have ids like
-// "00000002-…". They are blocks, not real pages: listPageBlocks rejects them
-// with 400 "block is not a page", and the API exposes no way to read their
-// children. Skip them and surface the ids so the user can move those cards
-// into real pages.
-function isReservedPageId(id: string): boolean {
-  return /^0000000[0-9a-f]/i.test(id)
-}
-
-// Recursively walk a block tree and collect blocks whose uuid is in `targets`.
-function findBlocksInTree(blocks: BlockResponse[], targets: Set<string>): BlockResponse[] {
-  const found: BlockResponse[] = []
-  function walk(b: BlockResponse) {
-    if (targets.has(b.uuid)) found.push(b)
-    for (const c of b.children ?? []) walk(c)
-  }
-  for (const b of blocks) walk(b)
-  return found
-}
-
-// ---- sync ----
 export type SyncReport = {
-  indexed: number
+  pulled: number
   newCards: number
-  updatedCards: number
+  contentUpdated: number
+  /** gateway won lastReview arbitration → local state overwritten */
+  stateUpdated: number
+  /** local state is newer → kept dirty for PUSH */
+  keptDirty: number
   deletedCards: number
-  /** Reserved Logseq page ids (e.g. tag pages) whose cards were skipped. */
-  skippedPages: string[]
-  /** How many candidate cards live on skipped (reserved) pages. */
-  skippedCards: number
-  /** Local candidate cards not found in any fetched page tree — approximates
-   *  "changed but not updated" (missed changes). */
-  unmatchedCards: number
+  decksCreated: number
+  pushed: number
+  /** PUSH hit a conflict (409) or the block caught up → gateway state adopted */
+  pushConflicts: number
+  /** PUSH could not complete (gateway unreachable / no dbId) — stays dirty */
+  pushFailed: number
   fullCheck: boolean
   startedAt: number
   finishedAt: number
 }
 
-const ALL_DECK_ID_QUERY = db
-  .selectFrom('decks')
-  .select('id')
-  .where('name', '=', 'All')
-  .where('deleted', '=', false)
-  .limit(1)
+// The builtin #Card class tag rides on every card block. It is NOT a deck
+// source (decks come from #Cards blocks); this filter is only used to compare
+// a card's own tags for content-change detection (§4.3).
+const BUILTIN_CARD_TAG = 'card'
+
+const nonBuiltinTags = (tags: string[]): string[] =>
+  tags.filter((t) => t.toLowerCase() !== BUILTIN_CARD_TAG)
+
+export async function loadConfig(): Promise<{ gatewayUrl: string }> {
+  const row = await db.selectFrom('config').selectAll().where('id', '=', 1).executeTakeFirstOrThrow()
+  if (!row.gatewayUrl) {
+    throw new Error('网关 URL 未配置，请到全局设置填写（logseq-cli2http 地址）')
+  }
+  return { gatewayUrl: row.gatewayUrl }
+}
 
 export async function sync(opts: { fullCheck?: boolean } = {}): Promise<SyncReport> {
   const startedAt = Date.now()
-  const { token, graphId } = await loadConfig()
-  const client = new LogseqClient(token)
+  const { gatewayUrl } = await loadConfig()
+  const client = new GatewayClient(gatewayUrl)
+  const now = () => Date.now()
 
-  const tagId = await client.findCardTagId(graphId)
-  if (!tagId) throw new Error('#card tag not found in graph')
+  // ① PULL — deck definitions first, then the full card snapshot.
+  //    Sequential on purpose: the gateway runs Logseq CLI per call and
+  //    parallel CLI spawns race on the db-worker lifecycle.
+  const deckDefs = await client.fetchDeckDefs()
+  const cards = await client.fetchCards()
+  const liveUuids = new Set(cards.map((c) => c.id))
 
-  const syncMeta = await db.selectFrom('sync_meta').selectAll().where('id', '=', 1).executeTakeFirstOrThrow()
-  const lastSync = syncMeta.last_sync_at ?? 0
+  // --- decks: All (virtual) + one per #Cards deck block (anchor = uuid) ---
+  const allDeck = await db
+    .selectFrom('decks')
+    .selectAll()
+    .where('name', '=', 'All')
+    .where('deleted', '=', false)
+    .executeTakeFirstOrThrow()
 
-  // A. full index
-  const objects = await client.listTagObjects(graphId, tagId)
-  const liveUuids = new Set(objects.map((o) => o.uuid))
+  const deckIdByAnchor = new Map<string, number>()
+  let decksCreated = 0
+  for (const def of deckDefs) {
+    let deck = await db
+      .selectFrom('decks')
+      .selectAll()
+      .where('anchorUuid', '=', def.uuid)
+      .executeTakeFirst()
+    if (!deck || deck.deleted) {
+      // new deck block (or resurrected) — keep settings if the row exists
+      if (deck) {
+        await db
+          .updateTable('decks')
+          .set({ deleted: false, name: def.name, updated: now() })
+          .where('id', '=', deck.id)
+          .execute()
+        deck = { ...deck, deleted: false, name: def.name }
+      } else {
+        deck = await db
+          .insertInto('decks')
+          .values({ name: def.name, anchorUuid: def.uuid })
+          .returningAll()
+          .executeTakeFirstOrThrow()
+        decksCreated++
+      }
+    } else if (deck.name !== def.name) {
+      // renamed in Logseq → follow, settings survive (anchor is the uuid)
+      await db
+        .updateTable('decks')
+        .set({ name: def.name, updated: now() })
+        .where('id', '=', deck.id)
+        .execute()
+      deck = { ...deck, name: def.name }
+    }
+    deckIdByAnchor.set(def.uuid, deck.id)
+  }
 
-  // B. deletion detection
-  const localRows = await db
-    .selectFrom('notes')
-    .select(['id', 'logseq_uuid', 'content_hash'])
+  // deck blocks that vanished from the graph → soft-delete the deck
+  const liveAnchors = new Set(deckDefs.map((d) => d.uuid))
+  const staleDecks = await db
+    .selectFrom('decks')
+    .selectAll()
+    .where('anchorUuid', 'is not', null)
     .where('deleted', '=', false)
     .execute()
-  const localUuids = new Map(localRows.map((r) => [r.logseq_uuid, r]))
-
-  const toDelete = [...localUuids.keys()].filter((u) => !liveUuids.has(u))
-  if (toDelete.length > 0) {
-    await db.updateTable('notes').set({ deleted: true, updated: startedAt }).where('logseq_uuid', 'in', toDelete).execute()
-    // memberships follow the note: excluded from every deck it belonged to
-    const deletedNoteIds = localRows.filter((r) => toDelete.includes(r.logseq_uuid)).map((r) => r.id)
-    if (deletedNoteIds.length > 0) {
-      await db.updateTable('note_decks').set({ deleted: true }).where('nid', 'in', deletedNoteIds).execute()
+  for (const stale of staleDecks) {
+    if (!liveAnchors.has(stale.anchorUuid!)) {
+      await db
+        .updateTable('decks')
+        .set({ deleted: true, updated: now() })
+        .where('id', '=', stale.id)
+        .execute()
     }
   }
 
-  // C. candidates: new + updated-after hits
-  const candidateUuids = new Set<string>()
-  for (const o of objects) {
-    if (!localUuids.has(o.uuid)) candidateUuids.add(o.uuid)
-  }
-  if (lastSync > 0) {
-    const updated = await client.listTagObjects(graphId, tagId, { updatedAfter: lastSync })
-    for (const o of updated) candidateUuids.add(o.uuid)
-  }
-
-  // D. full check override: scan all live uuids
-  const fullCheck = opts.fullCheck === true || syncMeta.last_full_check_at == null || startedAt - (syncMeta.last_full_check_at ?? 0) > 24 * 60 * 60 * 1000
-  if (fullCheck) {
-    for (const u of liveUuids) candidateUuids.add(u)
+  // dbId → deck ids membership index (a card may sit in several decks)
+  const deckIdsByDbId = new Map<number, number[]>()
+  for (const def of deckDefs) {
+    const did = deckIdByAnchor.get(def.uuid)!
+    for (const dbId of def.memberDbIds) {
+      let ids = deckIdsByDbId.get(dbId)
+      if (!ids) {
+        ids = []
+        deckIdsByDbId.set(dbId, ids)
+      }
+      ids.push(did)
+    }
   }
 
-  // E. fetch + upsert (bounded concurrency, by page tree instead of per-card getBlock)
-  const deck = await ALL_DECK_ID_QUERY.executeTakeFirstOrThrow()
-  const deckId = deck.id
-
-  // map candidate uuid → page-id (from tag index), then fetch only those pages
-  const uuidToPage = new Map<string, string | null>()
-  for (const o of objects) uuidToPage.set(o.uuid, o['page-id'] ?? null)
-  const pageIdsToFetch = new Set<string>()
-  for (const u of candidateUuids) {
-    const p = uuidToPage.get(u)
-    if (p) pageIdsToFetch.add(p)
-  }
-  const pageIds = [...pageIdsToFetch]
-  const skippedPages = pageIds.filter((p) => isReservedPageId(p))
-  const fetchablePageIds = pageIds.filter((p) => !isReservedPageId(p))
-  let skippedCards = 0
-  for (const u of candidateUuids) {
-    const p = uuidToPage.get(u)
-    if (p && isReservedPageId(p)) skippedCards++
+  // --- local state maps ---
+  const noteRows = await db.selectFrom('notes').selectAll().execute()
+  const notesByUuid = new Map(noteRows.map((n) => [n.logseq_uuid, n]))
+  const cardRows = await db.selectFrom('cards').selectAll().execute()
+  const cardsByNid = new Map(cardRows.map((c) => [c.nid, c]))
+  const noteDeckRows = await db.selectFrom('note_decks').selectAll().execute()
+  const activeDidsByNid = new Map<number, Set<number>>()
+  for (const nd of noteDeckRows) {
+    if (nd.deleted) continue
+    let s = activeDidsByNid.get(nd.nid)
+    if (!s) {
+      s = new Set()
+      activeDidsByNid.set(nd.nid, s)
+    }
+    s.add(nd.did)
   }
 
   let newCards = 0
-  let updatedCards = 0
-  const foundUuids = new Set<string>()
-  const CONCURRENCY = 3
-  for (let i = 0; i < fetchablePageIds.length; i += CONCURRENCY) {
-    const batch = fetchablePageIds.slice(i, i + CONCURRENCY)
-    const trees = await Promise.all(batch.map((p) => client.listPageBlocks(graphId, p)))
-    for (const blocks of trees) {
-      const found = findBlocksInTree(blocks, candidateUuids)
-      for (const block of found) {
-        foundUuids.add(block.uuid)
-        const parsed = parseCard(block)
-        const existing = localUuids.get(block.uuid)
-        if (!existing) {
-          const note = await db
-            .insertInto('notes')
-            .values({
-              did: deckId,
-              logseq_uuid: block.uuid,
-              page_id: parsed.pageId,
-              question: parsed.question,
-              answer: jsonb(parsed.answer),
-              content_hash: parsed.hash,
-              source: 'logseq',
-            })
-            .returning('id')
-            .executeTakeFirstOrThrow()
-          // the new note immediately joins its base deck (note-level membership)
-          await db
-            .insertInto('note_decks')
-            .values({ nid: note.id, did: deckId, deleted: false, created: startedAt })
-            .execute()
-          await db
-            .insertInto('cards')
-            .values({
-              did: deckId,
-              nid: note.id,
-              due: 0,
-              stability: 0,
-              difficulty: 0,
-              elapsed_days: 0,
-              scheduled_days: 0,
-              reps: 0,
-              lapses: 0,
-              state: 0,
-              last_review: null,
-            })
-            .execute()
-          newCards++
-        } else if (existing.content_hash !== parsed.hash) {
-          await db
-            .updateTable('notes')
-            .set({
-              question: parsed.question,
-              answer: jsonb(parsed.answer),
-              content_hash: parsed.hash,
-              page_id: parsed.pageId,
-              updated: startedAt,
-            })
-            .where('id', '=', existing.id)
-            .execute()
-          updatedCards++
-        }
-      }
+  let contentUpdated = 0
+  let stateUpdated = 0
+  let keptDirty = 0
+
+  /** All deck + every deck whose #Cards block query matched this card. */
+  const targetDids = (fc: FlatCard): number[] => {
+    const dids = [allDeck.id]
+    if (fc.dbId !== null) {
+      for (const did of deckIdsByDbId.get(fc.dbId) ?? []) dids.push(did)
     }
+    return dids
   }
 
-  // Candidates that exist locally, aren't on skipped (reserved) pages, yet
-  // weren't found in any fetched page tree — i.e. potential missed changes.
-  let unmatchedCards = 0
-  for (const u of candidateUuids) {
-    if (foundUuids.has(u)) continue
-    if (!localUuids.has(u)) continue
-    const p = uuidToPage.get(u)
-    if (p && isReservedPageId(p)) continue
-    unmatchedCards++
+  const ensureMemberships = async (nid: number, dids: number[]) => {
+    const cur = activeDidsByNid.get(nid) ?? new Set<number>()
+    const target = new Set(dids)
+    let changed = cur.size !== target.size
+    if (!changed) for (const d of target) if (!cur.has(d)) { changed = true; break }
+    if (!changed) return
+    const t = now()
+    await db
+      .insertInto('note_decks')
+      .values(dids.map((did) => ({ nid, did, deleted: false, created: t })))
+      .onConflict((oc) => oc.columns(['nid', 'did']).doUpdateSet({ deleted: false }))
+      .execute()
+    await db
+      .updateTable('note_decks')
+      .set({ deleted: true })
+      .where('nid', '=', nid)
+      .where('did', 'not in', dids)
+      .execute()
+    activeDidsByNid.set(nid, target)
   }
 
-  // F. tag-deck membership maintenance: for each tag deck, refresh which notes
-  // still carry the tag (→ active membership) and which no longer do
-  // (→ membership soft-deleted). Failures for one deck never abort the whole
-  // content sync — a tag deleted in Logseq would otherwise break sync forever.
-  const tagDecks = await db
-    .selectFrom('decks')
-    .select(['id', 'logseq_uuid'])
-    .where('deleted', '=', false)
-    .where('logseq_uuid', 'is not', null)
+  // --- ② merge ---
+  const seenUuids = new Set<string>()
+  for (const fc of cards) {
+    seenUuids.add(fc.id)
+    const note = notesByUuid.get(fc.id)
+    const t = now()
+    // primary deck = the first deck block whose query matched; All otherwise
+    const memberDids = fc.dbId !== null ? deckIdsByDbId.get(fc.dbId) ?? [] : []
+    const primaryDid = memberDids[0] ?? allDeck.id
+
+    if (!note) {
+      // new card: note + card + memberships
+      const inserted = await db
+        .insertInto('notes')
+        .values({
+          did: primaryDid,
+          logseq_uuid: fc.id,
+          dbId: fc.dbId,
+          question: fc.question,
+          deck: fc.deck,
+          pageId: fc.pageId,
+          parentId: fc.parentId,
+          tags: jsonb<string[]>(fc.tags),
+          properties: jsonb<Record<string, unknown>>(fc.properties),
+          cardSource: fc.cardSource,
+          createdAt: fc.createdAt,
+          updatedAt: fc.updatedAt,
+          deleted: false,
+          created: t,
+          updated: t,
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow()
+      await db
+        .insertInto('cards')
+        .values({
+          did: primaryDid,
+          nid: inserted.id,
+          ...tsCardValues(fc.card),
+          cardSource: fc.cardSource,
+          dirty: false,
+          created: t,
+          updated: t,
+        })
+        .execute()
+      activeDidsByNid.set(inserted.id, new Set())
+      await ensureMemberships(inserted.id, targetDids(fc))
+      newCards++
+      continue
+    }
+
+    // resurrect if it was soft-deleted locally but is back in Logseq
+    if (note.deleted) {
+      await db.updateTable('notes').set({ deleted: false, updated: t }).where('id', '=', note.id).execute()
+    }
+
+    // content merge (§4.3): updatedAt is a hint; question/tags are the truth.
+    // Content follows the gateway unconditionally; the card state does NOT.
+    const contentChanged =
+      fc.question !== note.question ||
+      fc.deck !== note.deck ||
+      fc.dbId !== note.dbId ||
+      fc.cardSource !== note.cardSource ||
+      (fc.updatedAt !== null && fc.updatedAt !== note.updatedAt) ||
+      JSON.stringify(nonBuiltinTags(fc.tags)) !== JSON.stringify(nonBuiltinTags(note.tags))
+    if (contentChanged) {
+      await db
+        .updateTable('notes')
+        .set({
+          did: primaryDid,
+          dbId: fc.dbId,
+          question: fc.question,
+          deck: fc.deck,
+          pageId: fc.pageId,
+          parentId: fc.parentId,
+          tags: jsonb<string[]>(fc.tags),
+          properties: jsonb<Record<string, unknown>>(fc.properties),
+          cardSource: fc.cardSource,
+          createdAt: fc.createdAt,
+          updatedAt: fc.updatedAt,
+          deleted: false,
+          updated: t,
+        })
+        .where('id', '=', note.id)
+        .execute()
+      contentUpdated++
+    }
+
+    // state merge: lastReview arbitration (§4.2 ②)
+    let pgCard = cardsByNid.get(note.id)
+    if (!pgCard) {
+      // legacy edge (note without a card row) — create from the gateway state
+      pgCard = await db
+        .insertInto('cards')
+        .values({
+          did: primaryDid,
+          nid: note.id,
+          ...tsCardValues(fc.card),
+          cardSource: fc.cardSource,
+          dirty: false,
+          created: t,
+          updated: t,
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow()
+      cardsByNid.set(note.id, pgCard)
+      continue
+    }
+    if (pgCard.deleted) {
+      await db.updateTable('cards').set({ deleted: false, updated: t }).where('id', '=', pgCard.id).execute()
+      pgCard = { ...pgCard, deleted: false }
+    }
+
+    const gw = fc.card.lastReview
+    const local = pgCard.lastReview
+    if (gw !== null && (local === null || gw > local)) {
+      // gateway (desktop plugin) reviewed after us → gateway wins
+      await db
+        .updateTable('cards')
+        .set({
+          ...tsCardValues(fc.card),
+          cardSource: fc.cardSource,
+          dirty: false,
+          deleted: false,
+          updated: t,
+        })
+        .where('id', '=', pgCard.id)
+        .execute()
+      stateUpdated++
+    } else if (gw !== local) {
+      // local newer (unpushed review) → keep, stays dirty for ③ PUSH
+      if (contentChanged) {
+        await db.updateTable('cards').set({ did: primaryDid, updated: t }).where('id', '=', pgCard.id).execute()
+      }
+      keptDirty++
+    }
+
+    await ensureMemberships(note.id, targetDids(fc))
+  }
+
+  // deletions: local notes the gateway no longer returns → soft delete
+  const toDelete = noteRows.filter((n) => !seenUuids.has(n.logseq_uuid) && !n.deleted)
+  if (toDelete.length > 0) {
+    const t = now()
+    await db
+      .updateTable('notes')
+      .set({ deleted: true, updated: t })
+      .where(
+        'id',
+        'in',
+        toDelete.map((n) => n.id),
+      )
+      .execute()
+    await db
+      .updateTable('cards')
+      .set({ deleted: true, updated: t })
+      .where(
+        'nid',
+        'in',
+        toDelete.map((n) => n.id),
+      )
+      .execute()
+    await db
+      .updateTable('note_decks')
+      .set({ deleted: true })
+      .where(
+        'nid',
+        'in',
+        toDelete.map((n) => n.id),
+      )
+      .execute()
+  }
+
+  // --- ③ PUSH dirty (§4.2 ③): re-read → conflict check → write back ---
+  const dirtyRows = await db
+    .selectFrom('cards as c')
+    .innerJoin('notes as n', 'n.id', 'c.nid')
+    .where('c.dirty', '=', true)
+    .where('c.deleted', '=', false)
+    .where('n.deleted', '=', false)
+    .selectAll('c')
+    .select('n.dbId as dbId')
     .execute()
-  for (const td of tagDecks) {
+
+  let pushed = 0
+  let pushConflicts = 0
+  let pushFailed = 0
+  for (const row of dirtyRows) {
+    const t = now()
+    const dbId = (row as { dbId: number | null }).dbId
+    if (dbId === null) {
+      pushFailed++
+      continue
+    }
+    // a) re-read the block's current state
+    let fresh: FlatCard | null = null
     try {
-      const objs = await client.listTagObjects(graphId, td.logseq_uuid!)
-      const tagUuids = new Set(objs.map((o) => o.uuid))
-
-      // notes that should be active members of this tag deck
-      const shouldMembers = [...tagUuids].length
-        ? await db
-            .selectFrom('notes')
-            .select('id')
-            .where('deleted', '=', false)
-            .where('logseq_uuid', 'in', [...tagUuids])
-            .execute()
-        : []
-      const shouldIds = shouldMembers.map((n) => n.id)
-
-      if (shouldIds.length > 0) {
-        await db
-          .insertInto('note_decks')
-          .values(shouldIds.map((nid) => ({ nid, did: td.id, deleted: false, created: startedAt })))
-          .onConflict((oc) => oc.columns(['nid', 'did']).doUpdateSet({ deleted: false }))
-          .execute()
+      fresh = await client.fetchCardById(dbId)
+    } catch {
+      pushFailed++
+      continue
+    }
+    const cur = fresh.card.lastReview
+    const localLast = row.lastReview
+    const localNewer = localLast !== null && (cur === null || localLast > cur)
+    if (localNewer) {
+      // b/c) push the local state, base = the block's current lastReview
+      const r = await client
+        .writeCardState(
+          dbId,
+          {
+            state: row.state,
+            due: row.due,
+            stability: row.stability,
+            difficulty: row.difficulty,
+            lastReview: row.lastReview,
+            learningSteps: row.learningSteps,
+            priorState: row.priorState,
+            elapsedDays: row.elapsedDays,
+            scheduledDays: row.scheduledDays,
+            reps: row.reps,
+            lapses: row.lapses,
+            lastRating: row.lastRating,
+          },
+          cur,
+        )
+        .catch(() => null)
+      if (r === null) {
+        pushFailed++
+        continue
       }
-      // active members that no longer carry the tag → excluded from this deck
-      // (nid not in shouldIds; empty list → every active row is excluded)
-      if (shouldIds.length > 0) {
-        await db
-          .updateTable('note_decks')
-          .set({ deleted: true })
-          .where('did', '=', td.id)
-          .where('deleted', '=', false)
-          .where('nid', 'not in', shouldIds)
-          .execute()
+      if (r.ok) {
+        await db.updateTable('cards').set({ dirty: false, updated: t }).where('id', '=', row.id).execute()
+        pushed++
       } else {
+        // 409: the block moved again → gateway state wins
         await db
-          .updateTable('note_decks')
-          .set({ deleted: true })
-          .where('did', '=', td.id)
-          .where('deleted', '=', false)
+          .updateTable('cards')
+          .set({ ...tsCardValues(r.current), dirty: false, updated: t })
+          .where('id', '=', row.id)
           .execute()
+        pushConflicts++
       }
-    } catch (e) {
-      // skip this deck's refresh; content sync must not fail because of it
-      console.warn(`[sync] tag-deck refresh failed for deck ${td.id}:`, e)
+    } else {
+      // the block caught up with (or passed) us → adopt the gateway state
+      await db
+        .updateTable('cards')
+        .set({ ...tsCardValues(fresh.card), dirty: false, updated: t })
+        .where('id', '=', row.id)
+        .execute()
+      pushConflicts++
     }
   }
 
+  // --- sync_meta ---
   const finishedAt = Date.now()
   await db
     .updateTable('sync_meta')
-    .set({ last_sync_at: finishedAt, ...(fullCheck ? { last_full_check_at: finishedAt } : {}) })
+    .set({ last_sync_at: finishedAt, last_full_check_at: finishedAt })
     .where('id', '=', 1)
     .execute()
 
   return {
-    indexed: objects.length,
+    pulled: cards.length,
     newCards,
-    updatedCards,
+    contentUpdated,
+    stateUpdated,
+    keptDirty,
     deletedCards: toDelete.length,
-    skippedPages,
-    skippedCards,
-    unmatchedCards,
-    fullCheck,
+    decksCreated,
+    pushed,
+    pushConflicts,
+    pushFailed,
+    // a full gateway pull happens every time — there is no incremental API
+    fullCheck: true,
     startedAt,
     finishedAt,
   }

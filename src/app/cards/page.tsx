@@ -80,11 +80,11 @@ function SortableTh({
 }
 
 export default function CardsPage() {
-  // filter inputs (answer is applied on submit, others take effect immediately)
+  // filter inputs (question is applied on submit, others take effect immediately)
   const [decks, setDecks] = useState<DeckOption[]>([])
   const [deckFilter, setDeckFilter] = useState('all')
-  const [answerInput, setAnswerInput] = useState('')
-  const [answerFilter, setAnswerFilter] = useState('')
+  const [questionInput, setQuestionInput] = useState('')
+  const [questionFilter, setQuestionFilter] = useState('')
   const [suspendedFilter, setSuspendedFilter] = useState('all')
   const [deletedFilter, setDeletedFilter] = useState('all')
   const [stateFilter, setStateFilter] = useState('all')
@@ -112,7 +112,7 @@ export default function CardsPage() {
       try {
         const p = new URLSearchParams()
         if (deckFilter !== 'all') p.set('deck', deckFilter)
-        if (answerFilter) p.set('answer', answerFilter)
+        if (questionFilter) p.set('question', questionFilter)
         if (suspendedFilter !== 'all') p.set('suspended', suspendedFilter)
         if (deletedFilter !== 'all') p.set('deleted', deletedFilter)
         if (stateFilter !== 'all') p.set('state', stateFilter)
@@ -139,15 +139,15 @@ export default function CardsPage() {
         setLoading(false)
       }
     },
-    [deckFilter, answerFilter, suspendedFilter, deletedFilter, stateFilter, sort, order],
+    [deckFilter, questionFilter, suspendedFilter, deletedFilter, stateFilter, sort, order],
   )
 
   useEffect(() => {
     fetchCards(0)
   }, [fetchCards])
 
-  function applyAnswer() {
-    setAnswerFilter(answerInput.trim())
+  function applyQuestion() {
+    setQuestionFilter(questionInput.trim())
   }
 
   function toggleSort(k: SortKey) {
@@ -193,13 +193,13 @@ export default function CardsPage() {
           </select>
 
           <Input
-            placeholder="搜索答案…"
-            value={answerInput}
-            onChange={(e) => setAnswerInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && applyAnswer()}
+            placeholder="搜索问题…"
+            value={questionInput}
+            onChange={(e) => setQuestionInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && applyQuestion()}
             className="w-44"
           />
-          <Button size="sm" variant="secondary" onClick={applyAnswer} disabled={loading}>
+          <Button size="sm" variant="secondary" onClick={applyQuestion} disabled={loading}>
             <Search className="h-4 w-4" />
             查询
           </Button>
