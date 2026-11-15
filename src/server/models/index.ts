@@ -126,6 +126,11 @@ export type FSRSParametersRow = {
   enable_short_term: boolean
   w: number[]
   day_start: number // hour of day, e.g. 3 = 03:00
+  // ts-fsrs v5 (FSRS-6) steps — optional: rows saved before the upgrade have
+  // neither; the scheduler's toFsrsParams() fills the defaults.
+  // StepUnit strings like '1m'/'10m' (ts-fsrs `Steps` type).
+  learning_steps?: string[]
+  relearning_steps?: string[]
 }
 
 export type CardLimitRow = {

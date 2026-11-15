@@ -6,6 +6,8 @@ import {
   type Card,
   type Grade,
   type FSRSParameters,
+  generatorParameters,
+  migrateParameters,
   Rating,
   State,
   type RecordLogItem,
@@ -52,6 +54,22 @@ function dbCardToFsrsCard(c: Selectable<CardTable>): Card {
     lapses: c.lapses,
     state: c.state as State,
     last_review: c.lastReview != null ? new Date(num(c.lastReview)) : undefined,
+    learning_steps: num(c.learningSteps),
+  }
+}
+
+/**
+ * decks.fsrs jsonb → complete ts-fsrs v5 parameters.
+ * The row may predate the v5 upgrade (no learning_steps/relearning_steps and
+ * a 19-weight FSRS-5 `w`); fill v5 defaults, then migrate the weights to the
+ * FSRS-6 length via migrateParameters.
+ */
+function toFsrsParams(raw: unknown): FSRSParameters {
+  const row = (raw ?? {}) as Partial<FSRSParameters>
+  const merged = { ...generatorParameters(), ...row } as FSRSParameters
+  return {
+    ...merged,
+    w: migrateParameters(merged.w, merged.relearning_steps.length, merged.enable_short_term),
   }
 }
 
@@ -191,8 +209,7 @@ class SchedulerService {
       .select(['d.fsrs as fsrs', 'n.dbId as dbId'])
       .where('c.id', '=', cid)
       .executeTakeFirstOrThrow()
-    const params = row.fsrs as FSRSParameters
-    const f = fsrs(params)
+    const f = fsrs(toFsrsParams(row.fsrs))
     const fsrsCard = dbCardToFsrsCard(row)
     const preLastReview = row.lastReview
     const preState = row.state
@@ -223,7 +240,7 @@ class SchedulerService {
       stability: num(nextCard.stability),
       difficulty: num(nextCard.difficulty),
       lastReview: nextCard.last_review ? num(nextCard.last_review.getTime()) : null,
-      learningSteps: num(row.learningSteps), // ts-fsrs 4.5 core has none — passthrough
+      learningSteps: num(nextCard.learning_steps), // ts-fsrs v5: progressed by the scheduler
       priorState: num(preState),
       elapsedDays: num(nextCard.elapsed_days),
       scheduledDays: num(nextCard.scheduled_days),
@@ -287,7 +304,7 @@ class SchedulerService {
       .executeTakeFirstOrThrow()
     const logRow = await db.selectFrom('revlog').selectAll().where('id', '=', lid).where('cid', '=', cid).executeTakeFirstOrThrow()
 
-    const f = fsrs(row.fsrs as FSRSParameters)
+    const f = fsrs(toFsrsParams(row.fsrs))
     const logWithRating = { ...logRow, rating: logRow.grade }
     const now = Date.now()
 
@@ -320,7 +337,7 @@ class SchedulerService {
           stability: num(restored.stability),
           difficulty: num(restored.difficulty),
           lastReview: restored.last_review ? num(restored.last_review.getTime()) : null,
-          learningSteps: num(row.learningSteps),
+          learningSteps: num(restored.learning_steps),
           priorState: num(row.priorState),
           elapsedDays: num(restored.elapsed_days),
           scheduledDays: num(restored.scheduled_days),
@@ -354,6 +371,7 @@ class SchedulerService {
       reps: num(c.reps),
       lapses: num(c.lapses),
       state: num(c.state),
+      learningSteps: num(c.learning_steps),
       lastReview: c.last_review ? num(c.last_review.getTime()) : undefined,
       priorState: num(priorState),
       lastRating: num(lastRating),
