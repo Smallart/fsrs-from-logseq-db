@@ -42,5 +42,7 @@ docs
 *.tar.gz
 backups
 
-# runtime logs — mapped from the host, not baked into the image
-logs
+# runtime logs — mapped from the host, not baked into the image.
+# Anchored to the build root (/logs) so we do NOT ignore
+# src/server/migrations/logs/ (DB migration files live in a "logs" dir too).
+/logs
