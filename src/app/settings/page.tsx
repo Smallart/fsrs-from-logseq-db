@@ -27,12 +27,29 @@ type SyncReport = {
   finishedAt: number
 } | { error: string }
 
+/** Gateway /api/auth/* TokenCheck (token metadata only, never the token). */
+type TokenCheck = {
+  token: {
+    exists: boolean
+    parseable: boolean
+    expired: boolean
+    expiringSoon: boolean
+    remainingMs: number | null
+    expiresAt: number | null
+    email: string | null
+    sub: string | null
+  }
+  authPath: string
+  checkedAt: number
+} | { error: string; code?: string }
+
 export default function SettingsPage() {
   const router = useRouter()
   const [gatewayUrl, setGatewayUrl] = useState('')
   const [saving, setSaving] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [report, setReport] = useState<SyncReport | null>(null)
+  const [authInfo, setAuthInfo] = useState<TokenCheck | null>(null)
   const [msg, setMsg] = useState('')
 
   useEffect(() => {
@@ -62,6 +79,28 @@ export default function SettingsPage() {
     setSyncing(true)
     setReport(null)
     setMsg('')
+    setAuthInfo(null)
+
+    // 鉴权验证：网关 ensure 在 token 缺失/过期/临期时自动重登；
+    // 失效或出错则中止本次同步（数据拉取依赖有效 token 的同步链路）
+    const authRes = await fetch('/api/gateway/auth/ensure', { method: 'POST' })
+    const auth: TokenCheck = await authRes.json().catch(() => ({ error: '鉴权检查失败' }))
+    if (!authRes.ok || 'error' in auth) {
+      setSyncing(false)
+      const error = 'error' in auth ? auth.error : `鉴权检查失败（HTTP ${authRes.status}）`
+      setReport({ error: `鉴权验证未通过：${error}` })
+      return
+    }
+    if (!auth.token.parseable || auth.token.expired) {
+      setSyncing(false)
+      setReport({
+        error:
+          'Logseq 云 token 已失效且自动重登未成功——请检查网关的 LOGSEQ_LOGIN_PASS 配置，或在网关所在机器手动执行 logseq login',
+      })
+      return
+    }
+    setAuthInfo(auth)
+
     const res = await fetch('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -115,7 +154,7 @@ export default function SettingsPage() {
         <CardHeader>
           <CardTitle>同步</CardTitle>
           <CardDescription>
-            从网关全量拉取卡片：内容跟随 Logseq，FSRS 状态按 lastReview 仲裁（最新者赢），未推送的本地复习会自动补推
+            拉取前先验证 Logseq 云 token（失效时网关自动重登）；随后从网关全量拉取卡片：内容跟随 Logseq，FSRS 状态按 lastReview 仲裁（最新者赢），未推送的本地复习会自动补推
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -123,6 +162,14 @@ export default function SettingsPage() {
             <RefreshCw className="h-4 w-4" />
             {syncing ? '同步中…' : '立即同步'}
           </Button>
+
+          {authInfo && !('error' in authInfo) && (
+            <div className="text-sm text-muted-foreground">
+              ✓ 鉴权有效：{authInfo.token.email ?? '未知账号'}
+              {authInfo.token.remainingMs != null &&
+                `（剩余 ${Math.max(0, Math.round(authInfo.token.remainingMs / 60000))} 分钟）`}
+            </div>
+          )}
 
           {report && !('error' in report) && (
             <div className="space-y-2 rounded-md bg-muted/60 p-3 text-sm">

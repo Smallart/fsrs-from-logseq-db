@@ -39,6 +39,38 @@ export type DeckDef = {
   dslOk: boolean
 }
 
+/**
+ * Logseq cloud auth token status — metadata only, the token itself is never
+ * exposed by the gateway (gateway `/api/auth/*`).
+ */
+export type TokenStatus = {
+  /** auth.json exists on disk */
+  exists: boolean
+  /** valid JSON with a finite numeric `expires-at` */
+  parseable: boolean
+  /** no usable token, or past `expires-at` */
+  expired: boolean
+  /** valid but remaining lifetime is within the gateway's refresh threshold */
+  expiringSoon: boolean
+  /** `expires-at - now` in ms (negative once past expiry); null when unknown */
+  remainingMs: number | null
+  /** absolute `expires-at` epoch ms; null when unknown */
+  expiresAt: number | null
+  /** auth.json's `email`; null when absent */
+  email: string | null
+  /** auth.json's `sub`; null when absent */
+  sub: string | null
+}
+
+/** Shared `data` body of the gateway's `/api/auth/*` endpoints. */
+export type TokenCheck = {
+  token: TokenStatus
+  /** the auth file path the gateway actually reads */
+  authPath: string
+  /** epoch ms of this check */
+  checkedAt: number
+}
+
 /** One flat card from the gateway (batch endpoint: `answer` is always []). */
 export type FlatCard = {
   id: string // Logseq block UUID
@@ -114,6 +146,29 @@ function normalizeFlatCard(raw: Record<string, unknown>): FlatCard {
   }
 }
 
+function normalizeTokenStatus(raw: unknown): TokenStatus {
+  const o = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  return {
+    exists: o.exists === true,
+    parseable: o.parseable === true,
+    expired: o.expired === true,
+    expiringSoon: o.expiringSoon === true,
+    remainingMs: typeof o.remainingMs === 'number' && Number.isFinite(o.remainingMs) ? o.remainingMs : null,
+    expiresAt: typeof o.expiresAt === 'number' && Number.isFinite(o.expiresAt) ? o.expiresAt : null,
+    email: typeof o.email === 'string' && o.email !== '' ? o.email : null,
+    sub: typeof o.sub === 'string' && o.sub !== '' ? o.sub : null,
+  }
+}
+
+function normalizeTokenCheck(raw: unknown): TokenCheck {
+  const o = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  return {
+    token: normalizeTokenStatus(o.token),
+    authPath: String(o.authPath ?? ''),
+    checkedAt: num(o.checkedAt),
+  }
+}
+
 export class GatewayClient {
   constructor(private baseUrl: string) {}
 
@@ -163,6 +218,22 @@ export class GatewayClient {
         dslOk: d.dslOk === true,
       }))
       .filter((d) => d.uuid !== '')
+  }
+
+  /** GET /api/auth/token — read-only token status, never triggers login. */
+  async fetchTokenStatus(): Promise<TokenCheck> {
+    const { body } = await this.req('/api/auth/token')
+    return normalizeTokenCheck((body as { data?: unknown })?.data)
+  }
+
+  /**
+   * POST /api/auth/ensure — re-login only when the token is missing, expired,
+   * or expiring soon (the gateway auto-relogins with its configured
+   * credentials). 409 auth_not_configured when the gateway has no credentials.
+   */
+  async ensureAuth(): Promise<TokenCheck> {
+    const { body } = await this.req('/api/auth/ensure', { method: 'POST' })
+    return normalizeTokenCheck((body as { data?: unknown })?.data)
   }
 
   /** GET /api/cards/:dbId — single card with the answer filled (§4.5). */
