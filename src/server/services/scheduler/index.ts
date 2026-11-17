@@ -88,11 +88,16 @@ class SchedulerService {
   /**
    * Pick the next card to review.
    *
-   * Algorithm (unchanged from the pre-gateway version):
    * 1. Overdue branch — if any Learning/Relearning/Review card has due <= now,
    *    return the MOST RECENTLY overdue one (max due among overdue).
-   * 2. Otherwise: 80% draw a New card (respecting the daily new limit),
-   *    20% return the soonest-due pool card — with cross-fallbacks.
+   * 2. Otherwise: 80% draw a New card (respecting the daily new limit,
+   *    deck-scoped), 20% return the soonest-due pool card due TODAY
+   *    (due <= next day boundary) — with cross-fallbacks.
+   *
+   * Cards due after the next day boundary belong to a future day and are never
+   * served early: once today's due cards are reviewed and the daily new limit
+   * is exhausted, next() returns null ("done for today"). Review/learning
+   * volumes are intentionally NOT capped — due cards are always served.
    */
   async next(deckId?: number): Promise<NextCard | null> {
     const deck = await db
@@ -107,7 +112,7 @@ class SchedulerService {
       .executeTakeFirstOrThrow()
     const fsrsParams = deck.fsrs
     const now = new Date()
-    const { todayStart } = dayBoundaryMs(now, fsrsParams.day_start ?? 3)
+    const { todayStart, nextBoundary } = dayBoundaryMs(now, fsrsParams.day_start ?? 3)
 
     // deck membership is note-level (shared cards): a card enters a deck
     // through its note's active note_decks row.
@@ -143,24 +148,34 @@ class SchedulerService {
       .executeTakeFirst()
     if (overdue) return overdue as NextCard
 
-    // 2. Nothing overdue: soonest-due pool card (min due = closest to now).
+    // 2. Nothing overdue: soonest-due pool card due TODAY (due <= nextBoundary).
+    //    Cards due after the next day boundary belong to a future day — serving
+    //    them early would pre-drain those days (nothing left due when they
+    //    arrive). Overdue cards (due <= now) are a subset of this window.
     const pickFuture = async (): Promise<NextCard | null> =>
       ((await baseQuery()
         .select(fields)
         .where('c.state', 'in', [State.Learning, State.Review, State.Relearning])
+        .where('c.due', '<=', nextBoundary)
         .orderBy('c.due', 'asc')
         .limit(1)
         .executeTakeFirst()) as NextCard) ?? null
 
     // New card draw, respecting the daily new limit.
     const drawNew = async (): Promise<NextCard | null> => {
-      // cards first seen today = cid groups whose min(review) >= todayStart
+      // cards of THIS deck first seen today = cid groups whose min(review)
+      // >= todayStart, scoped to the deck (join cards → member nids) — the
+      // exact same rule as /api/cards/stats. Without the deck filter, other
+      // decks' new cards eat this deck's daily quota.
       const firstSeenToday = db
-        .selectFrom('revlog')
-        .where('revlog.deleted', '=', false)
-        .groupBy('cid')
-        .having(sql`min(review)`, '>=', todayStart)
-        .select('cid')
+        .selectFrom('revlog as r')
+        .innerJoin('cards as c', 'c.id', 'r.cid')
+        .where('r.deleted', '=', false)
+        .where('c.deleted', '=', false)
+        .where('c.nid', 'in', memberNids())
+        .groupBy('r.cid')
+        .having(sql`min(r.review)`, '>=', todayStart)
+        .select('r.cid')
         .as('t')
 
       const todayNewLearned = await db

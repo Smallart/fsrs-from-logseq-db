@@ -36,12 +36,16 @@ const assert = (label, cond, extra = '') => {
 const login = await j('/api/auth/login', { method: 'POST', body: JSON.stringify({ password: pw }) })
 assert('login', login.status === 200, `status=${login.status}`)
 
-// ---- 1. settings-page auth ensure: local auth.json is expired and the
-//         gateway has no LOGSEQ_LOGIN_PASS → expect 409 auth_not_configured ----
+// ---- 1. settings-page auth ensure: the gateway must block the sync when it
+//         cannot guarantee a valid Logseq cloud token. Two legitimate blocked
+//         states: 409 auth_not_configured (no auto-login credentials) or 502
+//         (credentials exist but the login produced no unexpired token).
+//         What must NEVER happen is a 200 with a broken token. ----
 const ensure = await j('/api/gateway/auth/ensure', { method: 'POST' })
 assert(
-  'ensure blocked with auth_not_configured (409)',
-  ensure.status === 409 && ensure.body?.code === 'auth_not_configured',
+  'ensure blocked with a reason (409 not-configured / 502 login-failed)',
+  (ensure.status === 409 && ensure.body?.code === 'auth_not_configured') ||
+    (ensure.status === 502 && typeof ensure.body?.error === 'string'),
   `status=${ensure.status} body=${JSON.stringify(ensure.body).slice(0, 120)}`,
 )
 
